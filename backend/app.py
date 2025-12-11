@@ -1,9 +1,9 @@
 """
-Hikvision EMS Backend API
-Main application with all routes
+Hikvision EMS Backend API with Server-Sent Events (SSE)
+Complete implementation - No polling needed
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import sqlite3
 import json
@@ -13,6 +13,8 @@ from database import init_db, get_db
 from hikvision_service import HikvisionService
 import os
 from dotenv import load_dotenv
+import queue
+import threading
 
 load_dotenv()
 
@@ -29,6 +31,58 @@ logger = logging.getLogger(__name__)
 
 # Services
 hikvision = HikvisionService()
+
+# SSE notification system
+notification_queues = []
+notification_lock = threading.Lock()
+
+def broadcast_event(event_type, data):
+    """Broadcast event to all connected SSE clients"""
+    message = json.dumps({
+        'type': event_type,
+        'data': data,
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    with notification_lock:
+        dead_queues = []
+        for q in notification_queues:
+            try:
+                q.put(message)
+            except:
+                dead_queues.append(q)
+        
+        # Remove dead queues
+        for q in dead_queues:
+            notification_queues.remove(q)
+    
+    logger.info(f"📡 Broadcasted event: {event_type}")
+
+# ============================================
+# SSE ENDPOINT
+# ============================================
+
+@app.route('/api/events/stream')
+def event_stream():
+    """Server-Sent Events endpoint for live updates"""
+    def generate():
+        q = queue.Queue()
+        with notification_lock:
+            notification_queues.append(q)
+        
+        try:
+            # Send initial connection message
+            yield f"data: {json.dumps({'type': 'connected', 'message': 'Connected to live stream'})}\n\n"
+            
+            while True:
+                message = q.get()
+                yield f"data: {message}\n\n"
+        except GeneratorExit:
+            with notification_lock:
+                if q in notification_queues:
+                    notification_queues.remove(q)
+    
+    return Response(generate(), mimetype='text/event-stream')
 
 # ============================================
 # CUSTOM ERROR HANDLER
@@ -106,7 +160,6 @@ def get_employees():
         logger.error(f"Error fetching employees: {str(e)}")
         raise APIError("Failed to fetch employees", 500)
 
-
 @app.route('/api/employees/<employee_id>', methods=['GET'])
 def get_employee(employee_id):
     """Get single employee with attendance stats"""
@@ -157,7 +210,6 @@ def get_employee(employee_id):
     except Exception as e:
         logger.error(f"Error fetching employee: {str(e)}")
         raise APIError("Failed to fetch employee", 500)
-
 
 @app.route('/api/employees/register', methods=['POST'])
 def register_employee():
@@ -211,6 +263,13 @@ def register_employee():
         
         logger.info(f"✅ Employee registered: {data['name']} ({data['employee_id']})")
         
+        # Broadcast event to all connected clients
+        broadcast_event('employee_added', {
+            'employee_id': data['employee_id'],
+            'name': data['name'],
+            'department': data.get('department', 'General')
+        })
+        
         return jsonify({
             'success': True,
             'message': 'Employee registered successfully',
@@ -228,7 +287,6 @@ def register_employee():
     except Exception as e:
         logger.error(f"Registration error: {str(e)}")
         raise APIError("Registration failed", 500)
-
 
 @app.route('/api/employees/<employee_id>', methods=['PUT'])
 def update_employee(employee_id):
@@ -271,7 +329,6 @@ def update_employee(employee_id):
         logger.error(f"Update error: {str(e)}")
         raise APIError("Failed to update employee", 500)
 
-
 @app.route('/api/employees/<employee_id>', methods=['DELETE'])
 def delete_employee(employee_id):
     """Deactivate employee"""
@@ -296,6 +353,9 @@ def delete_employee(employee_id):
         
         logger.info(f"✅ Employee deactivated: {employee_id}")
         
+        # Broadcast event
+        broadcast_event('employee_deleted', {'employee_id': employee_id})
+        
         return jsonify({
             'success': True,
             'message': 'Employee deactivated successfully'
@@ -307,12 +367,10 @@ def delete_employee(employee_id):
         logger.error(f"Delete error: {str(e)}")
         raise APIError("Failed to delete employee", 500)
 
-
 # ============================================
 # ATTENDANCE ROUTES
 # ============================================
 
-# !!! CRITICAL FIX: Changed route to /event and added Multipart Support !!!
 @app.route('/event', methods=['POST'])
 def receive_attendance_event():
     """Receive scan event from Hikvision device"""
@@ -326,21 +384,18 @@ def receive_attendance_event():
                 try:
                     data = json.loads(event_log)
                 except json.JSONDecodeError:
-                    pass # Keep data as None if parsing fails
+                    pass
         
         # 2. Handle Standard JSON (Fallback)
         elif request.is_json:
             data = request.json
         
-        # 3. Filter Heartbeats (Fix for empty looping)
-        # If we still have no data, it's likely a heartbeat or invalid request
+        # 3. Filter Heartbeats
         if not data:
-            # Return 200 OK so the device knows we are alive, but do nothing
             return jsonify({'success': True, 'message': 'Heartbeat ignored'}), 200
 
         # 4. Process Real Data
         if 'AccessControllerEvent' not in data:
-            # Some heartbeats might come as JSON but without the Event key
             return jsonify({'success': True, 'message': 'No Access Event found'}), 200
         
         event = data['AccessControllerEvent']
@@ -351,7 +406,7 @@ def receive_attendance_event():
         sub_type = event.get('subEventType', 0)
         verify_mode = get_verify_mode(sub_type)
         
-        # Ignore unknown users or door logs
+        # Ignore unknown users
         if name == 'Unknown' or employee_id == 'Unknown':
             return jsonify({'success': True, 'message': 'Ignored unknown user'}), 200
         
@@ -393,8 +448,7 @@ def receive_attendance_event():
             check_out_time = datetime.strptime(current_time, '%H:%M:%S')
             duration = check_out_time - check_in_time
             
-            hours = duration.total_seconds() / 3600
-            hours_str = str(duration).split('.')[0] # Remove microseconds
+            hours_str = str(duration).split('.')[0]
             
             cursor.execute("""
                 UPDATE daily_attendance 
@@ -408,6 +462,15 @@ def receive_attendance_event():
         conn.commit()
         conn.close()
         
+        # Broadcast event to all connected clients
+        broadcast_event('attendance_scan', {
+            'employee_id': employee_id,
+            'name': name,
+            'verify_mode': verify_mode,
+            'scan_time': scan_time,
+            'action': action
+        })
+        
         return jsonify({
             'success': True,
             'message': 'Event processed successfully',
@@ -420,11 +483,8 @@ def receive_attendance_event():
         }), 200
         
     except Exception as e:
-        # Don't crash the server, just log the error
         logger.error(f"Event processing error: {str(e)}")
-        # Return 200 anyway so device doesn't retry frantically
         return jsonify({'success': False, 'message': 'Processed with error'}), 200
-
 
 @app.route('/api/attendance/daily', methods=['GET'])
 def get_daily_attendance():
@@ -456,7 +516,6 @@ def get_daily_attendance():
     except Exception as e:
         logger.error(f"Error fetching daily attendance: {str(e)}")
         raise APIError("Failed to fetch attendance", 500)
-
 
 @app.route('/api/attendance/logs', methods=['GET'])
 def get_attendance_logs():
@@ -494,7 +553,6 @@ def get_attendance_logs():
         logger.error(f"Error fetching logs: {str(e)}")
         raise APIError("Failed to fetch logs", 500)
 
-
 @app.route('/api/attendance/missed-checkout', methods=['GET'])
 def get_missed_checkout():
     """Get employees who missed checkout"""
@@ -524,7 +582,6 @@ def get_missed_checkout():
     except Exception as e:
         logger.error(f"Error fetching missed checkouts: {str(e)}")
         raise APIError("Failed to fetch missed checkouts", 500)
-
 
 @app.route('/api/attendance/manual-checkout', methods=['POST'])
 def manual_checkout():
@@ -567,6 +624,13 @@ def manual_checkout():
         
         logger.info(f"✅ Manual checkout: {employee_id} at {checkout_time}")
         
+        # Broadcast event
+        broadcast_event('manual_checkout', {
+            'employee_id': employee_id,
+            'date': date,
+            'time': checkout_time
+        })
+        
         return jsonify({
             'success': True,
             'message': 'Manual checkout recorded'
@@ -578,11 +642,9 @@ def manual_checkout():
         logger.error(f"Manual checkout error: {str(e)}")
         raise APIError("Failed to record checkout", 500)
 
-
 # ============================================
 # DASHBOARD ROUTES
 # ============================================
-
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
     """Get dashboard statistics"""
@@ -592,23 +654,32 @@ def get_dashboard_stats():
         
         today = datetime.now().strftime('%Y-%m-%d')
         
-        # Total employees
+        # Total ACTIVE employees only
         cursor.execute("SELECT COUNT(*) as total FROM employees WHERE status = 'active'")
         total_employees = cursor.fetchone()['total']
         
-        # Present today
-        cursor.execute("SELECT COUNT(*) as present FROM daily_attendance WHERE date = ?", (today,))
+        # Present today - ONLY COUNT ACTIVE EMPLOYEES
+        cursor.execute("""
+            SELECT COUNT(*) as present 
+            FROM daily_attendance da
+            INNER JOIN employees e ON da.employee_id = e.employee_id
+            WHERE da.date = ? AND e.status = 'active'
+        """, (today,))
         present_today = cursor.fetchone()['present']
         
-        # Missed checkout
+        # Ensure absent is never negative
+        absent_today = max(0, total_employees - present_today)
+        
+        # Missed checkout - ONLY ACTIVE EMPLOYEES
         cursor.execute("""
             SELECT COUNT(*) as missed 
-            FROM daily_attendance 
-            WHERE date = ? AND check_out IS NULL
+            FROM daily_attendance da
+            INNER JOIN employees e ON da.employee_id = e.employee_id
+            WHERE da.date = ? AND da.check_out IS NULL AND e.status = 'active'
         """, (today,))
         missed_checkout = cursor.fetchone()['missed']
         
-        # Recent scans (last 20)
+        # Recent scans (last 20) - ALL SCANS
         cursor.execute("""
             SELECT * FROM attendance_logs 
             ORDER BY id DESC 
@@ -616,11 +687,13 @@ def get_dashboard_stats():
         """)
         recent_scans = [dict(row) for row in cursor.fetchall()]
         
-        # Today's attendance list
+        # Today's attendance list - ONLY ACTIVE EMPLOYEES
         cursor.execute("""
-            SELECT * FROM daily_attendance 
-            WHERE date = ?
-            ORDER BY check_in DESC
+            SELECT da.* 
+            FROM daily_attendance da
+            INNER JOIN employees e ON da.employee_id = e.employee_id
+            WHERE da.date = ? AND e.status = 'active'
+            ORDER BY da.check_in DESC
         """, (today,))
         todays_attendance = [dict(row) for row in cursor.fetchall()]
         
@@ -631,7 +704,7 @@ def get_dashboard_stats():
             'data': {
                 'total_employees': total_employees,
                 'present_today': present_today,
-                'absent_today': total_employees - present_today,
+                'absent_today': absent_today,
                 'missed_checkout': missed_checkout,
                 'recent_scans': recent_scans,
                 'todays_attendance': todays_attendance
@@ -641,7 +714,6 @@ def get_dashboard_stats():
     except Exception as e:
         logger.error(f"Error fetching dashboard stats: {str(e)}")
         raise APIError("Failed to fetch dashboard stats", 500)
-
 
 # ============================================
 # SYSTEM ROUTES
@@ -659,10 +731,10 @@ def health_check():
             'database': 'connected',
             'device': 'connected' if device_status['success'] else 'disconnected',
             'mock_mode': hikvision.mock_mode,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'connected_clients': len(notification_queues)
         }
     }), 200
-
 
 @app.route('/api/system/departments', methods=['GET'])
 def get_departments():
@@ -685,7 +757,6 @@ def get_departments():
     except Exception as e:
         raise APIError("Failed to fetch departments", 500)
 
-
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
@@ -701,7 +772,6 @@ def get_verify_mode(code):
     }
     return modes.get(code, f"Code-{code}")
 
-
 # ============================================
 # MAIN
 # ============================================
@@ -716,7 +786,9 @@ if __name__ == '__main__':
     print("🚀 HIKVISION EMS SERVER STARTING")
     print("="*60)
     print(f"Server URL: http://localhost:{PORT}")
+    print(f"SSE Stream: http://localhost:{PORT}/api/events/stream")
     print(f"Mode: {'MOCK DEVICE' if hikvision.mock_mode else 'REAL DEVICE'}")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*60 + "\n")
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    
+    app.run(host='0.0.0.0', port=PORT, debug=True, threaded=True)

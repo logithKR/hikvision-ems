@@ -1,27 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { employeeAPI } from '../services/api';
+import { eventService } from '../services/eventService';
 import { toast } from 'react-toastify';
 import { 
   Search, 
-  Filter, 
   UserX, 
-  Eye, 
   Trash2,
-  RefreshCw 
+  RefreshCw,
+  Wifi
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 
 export default function EmployeeList() {
-  const navigate = useNavigate();
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [departmentFilter, setDepartmentFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('active');
-
-  useEffect(() => {
-    fetchEmployees();
-  }, [statusFilter, departmentFilter]);
+  const [connected, setConnected] = useState(false);
 
   const fetchEmployees = async () => {
     setLoading(true);
@@ -41,6 +36,37 @@ export default function EmployeeList() {
     }
   };
 
+  useEffect(() => {
+    fetchEmployees();
+
+    // Connect to event stream
+    eventService.connect();
+    setConnected(true);
+
+    // Listen for employee added event
+    const handleEmployeeAdded = (data) => {
+      console.log('🔔 Employee added:', data);
+      toast.success(`${data.name} added to system`);
+      fetchEmployees(); // Only refresh when employee is added
+    };
+
+    // Listen for employee deleted event
+    const handleEmployeeDeleted = (data) => {
+      console.log('🔔 Employee deleted:', data);
+      toast.info('Employee deactivated');
+      fetchEmployees(); // Only refresh when employee is deleted
+    };
+
+    eventService.on('employee_added', handleEmployeeAdded);
+    eventService.on('employee_deleted', handleEmployeeDeleted);
+
+    // Cleanup
+    return () => {
+      eventService.off('employee_added', handleEmployeeAdded);
+      eventService.off('employee_deleted', handleEmployeeDeleted);
+    };
+  }, [statusFilter, departmentFilter]);
+
   const handleDelete = async (employeeId, name) => {
     if (!window.confirm(`Are you sure you want to deactivate ${name}?`)) {
       return;
@@ -49,7 +75,7 @@ export default function EmployeeList() {
     try {
       await employeeAPI.delete(employeeId);
       toast.success('Employee deactivated successfully');
-      fetchEmployees();
+      // No need to manually refresh - event will trigger it
     } catch (error) {
       console.error('Error deleting employee:', error);
     }
@@ -68,12 +94,17 @@ export default function EmployeeList() {
           <h1 className="text-3xl font-bold text-gray-900">Employees</h1>
           <p className="text-gray-500 mt-1">Manage employee records</p>
         </div>
-        <button
-          onClick={() => navigate('/register')}
-          className="btn-primary"
-        >
-          + Add Employee
-        </button>
+        <div className="flex items-center space-x-3">
+          {/* Live indicator */}
+          <div className={`flex items-center space-x-2 px-4 py-2 rounded-lg ${
+            connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+          }`}>
+            <Wifi size={18} className={connected ? 'animate-pulse' : ''} />
+            <span className="text-sm font-medium">
+              {connected ? 'Live' : 'Disconnected'}
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Filters */}
@@ -201,9 +232,12 @@ export default function EmployeeList() {
           <p className="text-sm text-gray-600">
             Showing <span className="font-medium">{filteredEmployees.length}</span> employees
           </p>
-          <p className="text-sm text-gray-600">
-            Status: <span className="font-medium capitalize">{statusFilter}</span>
-          </p>
+          {connected && (
+            <div className="flex items-center space-x-2 text-green-600">
+              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+              <span className="text-xs font-medium">Live updates enabled</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

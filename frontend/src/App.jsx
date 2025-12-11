@@ -5,7 +5,6 @@ import 'react-toastify/dist/ReactToastify.css';
 
 import Layout from './components/Layout';
 import Dashboard from './components/Dashboard';
-import RegisterEmployee from './components/RegisterEmployee';
 import EmployeeList from './components/EmployeeList';
 import AttendanceView from './components/AttendanceView';
 
@@ -15,7 +14,7 @@ function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/register" element={<RegisterEmployee />} />
+          {/* REMOVED: Register route */}
           <Route path="/employees" element={<EmployeeList />} />
           <Route path="/attendance" element={<AttendanceView />} />
         </Routes>
