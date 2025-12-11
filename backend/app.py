@@ -719,5 +719,4 @@ if __name__ == '__main__':
     print(f"Mode: {'MOCK DEVICE' if hikvision.mock_mode else 'REAL DEVICE'}")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*60 + "\n")
-    
     app.run(host='0.0.0.0', port=PORT, debug=True)
