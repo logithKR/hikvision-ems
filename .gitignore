@@ -1,0 +1,12 @@
+# Ignore testing folder
+testing/
+mock_device/
+
+# Ignore node modules and env files
+node_modules/
+.env
+__pycache__/
+*.pyc
+*.db
+dist/
+.DS_Store
