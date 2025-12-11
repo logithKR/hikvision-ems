@@ -15,9 +15,12 @@ import os
 from dotenv import load_dotenv
 import queue
 import threading
+<<<<<<< HEAD
 
 # --- IMPORT THE NEW SYNC MODULE ---
 import user  # This imports your user.py file
+=======
+>>>>>>> 063b7682ac44fb8019c76d9a947a515450dfd168
 
 load_dotenv()
 
@@ -692,7 +695,12 @@ def get_dashboard_stats():
         
         # Today's attendance list - ONLY ACTIVE EMPLOYEES
         cursor.execute("""
+<<<<<<< HEAD
             SELECT da.* FROM daily_attendance da
+=======
+            SELECT da.* 
+            FROM daily_attendance da
+>>>>>>> 063b7682ac44fb8019c76d9a947a515450dfd168
             INNER JOIN employees e ON da.employee_id = e.employee_id
             WHERE da.date = ? AND e.status = 'active'
             ORDER BY da.check_in DESC
@@ -799,4 +807,8 @@ if __name__ == '__main__':
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*60 + "\n")
     
+<<<<<<< HEAD
     app.run(host='0.0.0.0', port=PORT, debug=True, threaded=True)
+=======
+    app.run(host='0.0.0.0', port=PORT, debug=True, threaded=True)
+>>>>>>> 063b7682ac44fb8019c76d9a947a515450dfd168
