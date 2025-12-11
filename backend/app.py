@@ -312,28 +312,46 @@ def delete_employee(employee_id):
 # ATTENDANCE ROUTES
 # ============================================
 
-@app.route('/api/attendance/event', methods=['POST'])
+# !!! CRITICAL FIX: Changed route to /event and added Multipart Support !!!
+@app.route('/event', methods=['POST'])
 def receive_attendance_event():
     """Receive scan event from Hikvision device"""
     try:
-        # Parse event data
-        data = request.json or {}
-        
-        if not data:
-            # Try form data (real device sends as form)
+        data = None
+
+        # 1. Handle Multipart Data (FIX for 415 Error)
+        if request.form:
             event_log = request.form.get('event_log')
             if event_log:
-                data = json.loads(event_log)
+                try:
+                    data = json.loads(event_log)
+                except json.JSONDecodeError:
+                    pass # Keep data as None if parsing fails
         
-        if not data or 'AccessControllerEvent' not in data:
-            raise APIError("Invalid event data", 400)
+        # 2. Handle Standard JSON (Fallback)
+        elif request.is_json:
+            data = request.json
+        
+        # 3. Filter Heartbeats (Fix for empty looping)
+        # If we still have no data, it's likely a heartbeat or invalid request
+        if not data:
+            # Return 200 OK so the device knows we are alive, but do nothing
+            return jsonify({'success': True, 'message': 'Heartbeat ignored'}), 200
+
+        # 4. Process Real Data
+        if 'AccessControllerEvent' not in data:
+            # Some heartbeats might come as JSON but without the Event key
+            return jsonify({'success': True, 'message': 'No Access Event found'}), 200
         
         event = data['AccessControllerEvent']
         employee_id = event.get('employeeNoString', 'Unknown')
         name = event.get('name', 'Unknown')
-        verify_mode = get_verify_mode(event.get('subEventType', 0))
         
-        # Ignore unknown users
+        # Get detailed verification mode
+        sub_type = event.get('subEventType', 0)
+        verify_mode = get_verify_mode(sub_type)
+        
+        # Ignore unknown users or door logs
         if name == 'Unknown' or employee_id == 'Unknown':
             return jsonify({'success': True, 'message': 'Ignored unknown user'}), 200
         
@@ -358,6 +376,8 @@ def receive_attendance_event():
         )
         existing = cursor.fetchone()
         
+        action = ""
+        
         if not existing:
             # First scan = check-in
             cursor.execute("""
@@ -374,7 +394,7 @@ def receive_attendance_event():
             duration = check_out_time - check_in_time
             
             hours = duration.total_seconds() / 3600
-            hours_str = str(duration)
+            hours_str = str(duration).split('.')[0] # Remove microseconds
             
             cursor.execute("""
                 UPDATE daily_attendance 
@@ -399,11 +419,11 @@ def receive_attendance_event():
             }
         }), 200
         
-    except APIError:
-        raise
     except Exception as e:
+        # Don't crash the server, just log the error
         logger.error(f"Event processing error: {str(e)}")
-        raise APIError("Failed to process attendance event", 500)
+        # Return 200 anyway so device doesn't retry frantically
+        return jsonify({'success': False, 'message': 'Processed with error'}), 200
 
 
 @app.route('/api/attendance/daily', methods=['GET'])
