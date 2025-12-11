@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { attendanceAPI } from '../services/api';
+import { eventService } from '../services/eventService';
 import { toast } from 'react-toastify';
-import { Calendar, Clock, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Calendar, Clock, AlertTriangle, RefreshCw, Wifi } from 'lucide-react';
 
 export default function AttendanceView() {
   const [activeTab, setActiveTab] = useState('daily');
@@ -10,10 +11,7 @@ export default function AttendanceView() {
   const [missedCheckout, setMissedCheckout] = useState([]);
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetchData();
-  }, [activeTab, selectedDate]);
+  const [connected, setConnected] = useState(false);
 
   const fetchData = async () => {
     setLoading(true);
@@ -35,6 +33,40 @@ export default function AttendanceView() {
     }
   };
 
+  useEffect(() => {
+    fetchData();
+
+    // Connect to event stream
+    eventService.connect();
+    setConnected(true);
+
+    // Listen for attendance scan events
+    const handleAttendanceScan = (data) => {
+      console.log('🔔 Attendance scan:', data);
+      const action = data.action === 'check_in' ? 'checked in' : 'checked out';
+      toast.info(`${data.name} ${action}`, {
+        icon: '👤'
+      });
+      fetchData(); // Refresh only when scan happens
+    };
+
+    // Listen for manual checkout events
+    const handleManualCheckout = (data) => {
+      console.log('🔔 Manual checkout:', data);
+      toast.success('Manual checkout recorded');
+      fetchData();
+    };
+
+    eventService.on('attendance_scan', handleAttendanceScan);
+    eventService.on('manual_checkout', handleManualCheckout);
+
+    // Cleanup
+    return () => {
+      eventService.off('attendance_scan', handleAttendanceScan);
+      eventService.off('manual_checkout', handleManualCheckout);
+    };
+  }, [activeTab, selectedDate]);
+
   const handleManualCheckout = async (employeeId) => {
     if (!window.confirm('Mark manual checkout for this employee?')) return;
 
@@ -45,7 +77,7 @@ export default function AttendanceView() {
         date: selectedDate
       });
       toast.success('Manual checkout recorded');
-      fetchData();
+      // No need to manually refresh - event will trigger it
     } catch (error) {
       console.error('Error with manual checkout:', error);
     }
@@ -65,13 +97,24 @@ export default function AttendanceView() {
           <h1 className="text-3xl font-bold text-gray-900">Attendance</h1>
           <p className="text-gray-500 mt-1">Track and manage attendance records</p>
         </div>
-        <button
-          onClick={fetchData}
-          className="btn-primary flex items-center space-x-2"
-        >
-          <RefreshCw size={18} />
-          <span>Refresh</span>
-        </button>
+        <div className="flex items-center space-x-3">
+          {/* Live indicator */}
+          <div className={`flex items-center space-x-2 px-4 py-2 rounded-lg ${
+            connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+          }`}>
+            <Wifi size={18} className={connected ? 'animate-pulse' : ''} />
+            <span className="text-sm font-medium">
+              {connected ? 'Live' : 'Disconnected'}
+            </span>
+          </div>
+          <button
+            onClick={fetchData}
+            className="btn-primary flex items-center space-x-2"
+          >
+            <RefreshCw size={18} />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -106,13 +149,19 @@ export default function AttendanceView() {
 
         {/* Date Selector for Daily */}
         {activeTab === 'daily' && (
-          <div className="mt-4">
+          <div className="mt-4 flex items-center justify-between">
             <input
               type="date"
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}
               className="input-field max-w-xs"
             />
+            {connected && (
+              <div className="flex items-center space-x-2 text-green-600">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span className="text-xs font-medium">Updates on scan</span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -141,7 +190,7 @@ export default function AttendanceView() {
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
                       {dailyAttendance.map((record) => (
-                        <tr key={record.id} className="hover:bg-gray-50">
+                        <tr key={record.id} className="hover:bg-gray-50 animate-slide-up">
                           <td className="px-6 py-4 whitespace-nowrap">
                             <div className="text-sm font-medium text-gray-900">{record.name}</div>
                             <div className="text-sm text-gray-500">{record.employee_id}</div>
@@ -173,7 +222,7 @@ export default function AttendanceView() {
               <div className="space-y-3">
                 {logs.length > 0 ? (
                   logs.map((log) => (
-                    <div key={log.id} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                    <div key={log.id} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg animate-slide-up">
                       <div className="flex items-center space-x-4">
                         <div className="flex-shrink-0">
                           <div className="p-2 bg-white rounded-lg shadow-sm">

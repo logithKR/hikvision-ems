@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { dashboardAPI } from '../services/api';
+import { dashboardAPI, attendanceAPI } from '../services/api';
+import { eventService } from '../services/eventService';
 import { 
   Users, 
   UserCheck, 
@@ -8,14 +9,22 @@ import {
   RefreshCw,
   Clock,
   Fingerprint,
-  Smartphone
+  Smartphone,
+  Activity,
+  Wifi,
+  Calendar,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import { toast } from 'react-toastify';
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
+  const [dateAttendance, setDateAttendance] = useState([]);
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [connected, setConnected] = useState(false);
 
   const fetchStats = async (showToast = false) => {
     try {
@@ -31,17 +40,89 @@ export default function Dashboard() {
     }
   };
 
+  const fetchDateAttendance = async (date) => {
+    try {
+      const response = await attendanceAPI.getDaily(date);
+      setDateAttendance(response.data.data);
+    } catch (error) {
+      console.error('Error fetching date attendance:', error);
+    }
+  };
+
   useEffect(() => {
+    // Initial fetch
     fetchStats();
-    const interval = setInterval(() => fetchStats(), 30000); // Auto-refresh every 30s
-    return () => clearInterval(interval);
+    fetchDateAttendance(selectedDate);
+
+    // Connect to live event stream
+    eventService.connect();
+    setConnected(true);
+
+    // Listen for attendance scan events
+    const handleScan = (data) => {
+      console.log('🔔 New scan:', data);
+      toast.info(`${data.name} - ${data.action === 'check_in' ? 'Checked In' : 'Checked Out'}`);
+      fetchStats(); // Refresh stats
+      // If scan is for selected date, refresh that too
+      const today = new Date().toISOString().split('T')[0];
+      if (selectedDate === today) {
+        fetchDateAttendance(selectedDate);
+      }
+    };
+
+    // Listen for employee added
+    const handleEmployeeAdded = (data) => {
+      console.log('🔔 Employee added:', data);
+      toast.success(`${data.name} registered`);
+      fetchStats();
+    };
+
+    // Listen for employee deleted
+    const handleEmployeeDeleted = (data) => {
+      console.log('🔔 Employee deleted:', data);
+      fetchStats();
+    };
+
+    eventService.on('attendance_scan', handleScan);
+    eventService.on('employee_added', handleEmployeeAdded);
+    eventService.on('employee_deleted', handleEmployeeDeleted);
+
+    // Cleanup
+    return () => {
+      eventService.off('attendance_scan', handleScan);
+      eventService.off('employee_added', handleEmployeeAdded);
+      eventService.off('employee_deleted', handleEmployeeDeleted);
+    };
   }, []);
+
+  // Fetch attendance when date changes
+  useEffect(() => {
+    fetchDateAttendance(selectedDate);
+  }, [selectedDate]);
 
   const getVerifyIcon = (mode) => {
     if (mode?.toLowerCase().includes('finger')) return <Fingerprint size={16} />;
     if (mode?.toLowerCase().includes('face')) return <Smartphone size={16} />;
     return <Clock size={16} />;
   };
+
+  const formatDuration = (duration) => {
+    if (!duration || duration === '0:00:00') return '-';
+    const parts = duration.split(':');
+    return `${parts[0]}h ${parts[1]}m`;
+  };
+
+  const changeDate = (days) => {
+    const currentDate = new Date(selectedDate);
+    currentDate.setDate(currentDate.getDate() + days);
+    setSelectedDate(currentDate.toISOString().split('T')[0]);
+  };
+
+  const goToToday = () => {
+    setSelectedDate(new Date().toISOString().split('T')[0]);
+  };
+
+  const isToday = selectedDate === new Date().toISOString().split('T')[0];
 
   if (loading) {
     return (
@@ -59,14 +140,27 @@ export default function Dashboard() {
           <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
           <p className="text-gray-500 mt-1">Real-time attendance monitoring</p>
         </div>
-        <button
-          onClick={() => fetchStats(true)}
-          disabled={refreshing}
-          className="btn-primary flex items-center space-x-2"
-        >
-          <RefreshCw size={18} className={refreshing ? 'animate-spin' : ''} />
-          <span>Refresh</span>
-        </button>
+        <div className="flex items-center space-x-3">
+          {/* Live indicator */}
+          <div className={`flex items-center space-x-2 px-4 py-2 rounded-lg ${
+            connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+          }`}>
+            <Wifi size={18} className={connected ? 'animate-pulse' : ''} />
+            <span className="text-sm font-medium">
+              {connected ? 'Live' : 'Disconnected'}
+            </span>
+          </div>
+          
+          {/* Manual refresh */}
+          <button
+            onClick={() => fetchStats(true)}
+            disabled={refreshing}
+            className="btn-primary flex items-center space-x-2"
+          >
+            <RefreshCw size={18} className={refreshing ? 'animate-spin' : ''} />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
 
       {/* Stats Cards */}
@@ -133,7 +227,15 @@ export default function Dashboard() {
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold text-gray-900">Recent Scans</h2>
-            <span className="badge badge-info">Live</span>
+            <div className="flex items-center space-x-2">
+              {connected && (
+                <div className="flex items-center space-x-1">
+                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                  <span className="text-xs text-green-600 font-medium">Live</span>
+                </div>
+              )}
+              <span className="badge badge-info">{stats?.recent_scans?.length || 0} scans</span>
+            </div>
           </div>
           
           <div className="space-y-3 max-h-96 overflow-y-auto">
@@ -141,7 +243,7 @@ export default function Dashboard() {
               stats.recent_scans.map((scan) => (
                 <div 
                   key={scan.id} 
-                  className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                  className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors animate-slide-up"
                 >
                   <div className="flex items-center space-x-3">
                     <div className="p-2 bg-white rounded-lg shadow-sm">
@@ -169,9 +271,12 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Today's Attendance */}
+        {/* Today's Attendance Summary */}
         <div className="card">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">Today's Attendance</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold text-gray-900">Today's Summary</h2>
+            <span className="badge badge-success">{stats?.todays_attendance?.length || 0} present</span>
+          </div>
           
           <div className="space-y-3 max-h-96 overflow-y-auto">
             {stats?.todays_attendance?.length > 0 ? (
@@ -204,6 +309,136 @@ export default function Dashboard() {
               <p className="text-center text-gray-500 py-8">No attendance records today</p>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Date-wise Attendance Detail */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center space-x-3">
+            <Calendar className="text-primary" size={24} />
+            <h2 className="text-xl font-semibold text-gray-900">Date-wise Attendance</h2>
+          </div>
+          
+          {/* Date Navigation */}
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => changeDate(-1)}
+              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Previous Day"
+            >
+              <ChevronLeft size={20} />
+            </button>
+            
+            <input
+              type="date"
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              className="input-field text-center font-medium"
+              style={{ width: '160px' }}
+            />
+            
+            <button
+              onClick={() => changeDate(1)}
+              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Next Day"
+            >
+              <ChevronRight size={20} />
+            </button>
+
+            {!isToday && (
+              <button
+                onClick={goToToday}
+                className="btn-secondary text-sm ml-2"
+              >
+                Today
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Date Statistics */}
+        <div className="grid grid-cols-3 gap-4 mb-4">
+          <div className="p-4 bg-green-50 rounded-lg border border-green-200">
+            <p className="text-sm text-green-600 font-medium">Present</p>
+            <p className="text-2xl font-bold text-green-700 mt-1">
+              {dateAttendance.length}
+            </p>
+          </div>
+          <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
+            <p className="text-sm text-blue-600 font-medium">Checked Out</p>
+            <p className="text-2xl font-bold text-blue-700 mt-1">
+              {dateAttendance.filter(a => a.check_out).length}
+            </p>
+          </div>
+          <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+            <p className="text-sm text-yellow-600 font-medium">Still In</p>
+            <p className="text-2xl font-bold text-yellow-700 mt-1">
+              {dateAttendance.filter(a => !a.check_out).length}
+            </p>
+          </div>
+        </div>
+
+        {/* Attendance Table */}
+        <div className="overflow-x-auto">
+          {dateAttendance.length > 0 ? (
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    Employee
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    Check In
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    Check Out
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    Duration
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    Status
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {dateAttendance.map((record) => (
+                  <tr key={record.id} className="hover:bg-gray-50 animate-slide-up">
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm font-medium text-gray-900">{record.name}</div>
+                      <div className="text-sm text-gray-500">{record.employee_id}</div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className="text-sm font-medium text-green-600">
+                        {record.check_in || '-'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className={`text-sm font-medium ${
+                        record.check_out ? 'text-blue-600' : 'text-yellow-600'
+                      }`}>
+                        {record.check_out || 'Pending'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {formatDuration(record.total_hours)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className="badge badge-success">
+                        {record.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="text-center py-12">
+              <UserX className="mx-auto text-gray-400 mb-4" size={48} />
+              <p className="text-gray-500">No attendance records for {selectedDate}</p>
+            </div>
+          )}
         </div>
       </div>
     </div>

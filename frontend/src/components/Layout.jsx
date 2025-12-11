@@ -1,9 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { 
   Home, 
   Users, 
-  UserPlus, 
   Clock, 
   Menu, 
   X,
@@ -12,14 +11,23 @@ import {
 
 export default function Layout({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [currentTime, setCurrentTime] = useState(new Date());
   const location = useLocation();
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: Home },
     { name: 'Employees', href: '/employees', icon: Users },
-    { name: 'Register Employee', href: '/register', icon: UserPlus },
     { name: 'Attendance', href: '/attendance', icon: Clock },
   ];
+
+  // Live clock update every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000); // Update every 1 second
+
+    return () => clearInterval(timer); // Cleanup
+  }, []);
 
   const isActive = (path) => location.pathname === path;
 
@@ -48,17 +56,18 @@ export default function Layout({ children }) {
             <div className="flex items-center space-x-4">
               <div className="text-right hidden sm:block">
                 <p className="text-sm font-medium text-gray-900">
-                  {new Date().toLocaleDateString('en-US', { 
+                  {currentTime.toLocaleDateString('en-US', { 
                     weekday: 'short', 
                     year: 'numeric', 
                     month: 'short', 
                     day: 'numeric' 
                   })}
                 </p>
-                <p className="text-xs text-gray-500">
-                  {new Date().toLocaleTimeString('en-US', { 
+                <p className="text-xs text-gray-500 font-mono">
+                  {currentTime.toLocaleTimeString('en-US', { 
                     hour: '2-digit', 
-                    minute: '2-digit' 
+                    minute: '2-digit',
+                    second: '2-digit'
                   })}
                 </p>
               </div>
