@@ -23,8 +23,8 @@ load_dotenv()
 DEVICE_IP = os.getenv('DEVICE_IP', '192.168.31.102')
 DEVICE_PORT = os.getenv('DEVICE_PORT', '80')
 USERNAME = os.getenv('DEVICE_USER', 'admin')
-PASSWORD = os.getenv('DEVICE_PASS', 'admin123')
-MOCK_MODE = os.getenv('MOCK_MODE', 'true').lower() == 'true'
+PASSWORD = os.getenv('DEVICE_PASS', 'Pranesh@232000')
+MOCK_MODE = os.getenv('MOCK_MODE', 'false').lower() == 'true'
 
 # Database file (Must match app.py)
 DB_NAME = "attendance.db"

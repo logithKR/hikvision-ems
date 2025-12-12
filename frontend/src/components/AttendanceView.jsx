@@ -68,21 +68,6 @@ export default function AttendanceView() {
     };
   }, [activeTab, selectedDate]);
 
-  const handleManualCheckout = async (employeeId) => {
-    if (!window.confirm('Mark manual checkout for this employee?')) return;
-
-    try {
-      await attendanceAPI.manualCheckout({
-        employee_id: employeeId,
-        checkout_time: new Date().toTimeString().split(' ')[0],
-        date: selectedDate
-      });
-      toast.success('Manual checkout recorded');
-    } catch (error) {
-      console.error('Error with manual checkout:', error);
-    }
-  };
-
   const formatDuration = (duration) => {
     if (!duration || duration === '0:00:00') return '-';
     const parts = duration.split(':');
@@ -98,17 +83,17 @@ export default function AttendanceView() {
     // Check for anomalies first
     if (record.anomaly_type) {
       const anomalyConfig = {
-        'missing_checkout': { label: 'Missing Checkout', color: 'yellow', icon: '⚠️' },
-        'checkout_without_checkin': { label: 'No Check-In', color: 'red', icon: '❌' },
-        'multiple_checkins': { label: 'Multiple Check-Ins', color: 'orange', icon: '🔄' },
-        'late_checkout': { label: 'Night Shift', color: 'purple', icon: '🌙' }
+        'missing_checkout': { label: 'Missing Checkout', color: 'yellow' },
+        'checkout_without_checkin': { label: 'No Check-In', color: 'red' },
+        'multiple_checkins': { label: 'Multiple Check-Ins', color: 'orange' },
+        'late_checkout': { label: 'Night Shift', color: 'purple' }
       };
 
-      const config = anomalyConfig[record.anomaly_type] || { label: 'Anomaly', color: 'gray', icon: '⚠️' };
+      const config = anomalyConfig[record.anomaly_type] || { label: 'Anomaly', color: 'gray' };
       
       return (
-        <span className={`px-2 py-1 text-xs rounded-full bg-${config.color}-100 text-${config.color}-800 border border-${config.color}-300`}>
-          {config.icon} {config.label}
+        <span className={`px-3 py-1 text-xs rounded-full bg-${config.color}-100 text-${config.color}-800 border border-${config.color}-300 font-medium`}>
+          {config.label}
         </span>
       );
     }
@@ -116,20 +101,20 @@ export default function AttendanceView() {
     // Normal status badges
     if (record.check_out) {
       return (
-        <span className="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800 border border-green-300">
-          ✅ Completed
+        <span className="px-3 py-1 text-xs rounded-full bg-green-100 text-green-800 border border-green-300 font-medium">
+          Completed
         </span>
       );
     } else if (record.check_in) {
       return (
-        <span className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800 border border-blue-300">
-          🔵 Working
+        <span className="px-3 py-1 text-xs rounded-full bg-blue-100 text-blue-800 border border-blue-300 font-medium">
+          Working
         </span>
       );
     }
 
     return (
-      <span className="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-800">
+      <span className="px-3 py-1 text-xs rounded-full bg-gray-100 text-gray-800 font-medium">
         {record.status || 'Unknown'}
       </span>
     );
@@ -138,19 +123,19 @@ export default function AttendanceView() {
   const getAttendanceStatusBadge = (status) => {
     if (status?.toLowerCase() === 'checkin') {
       return (
-        <span className="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800 border border-green-300">
-          ✅ Check In
+        <span className="px-3 py-1 text-xs rounded-full bg-green-100 text-green-800 border border-green-300 font-medium">
+          Check In
         </span>
       );
     } else if (status?.toLowerCase() === 'checkout') {
       return (
-        <span className="px-2 py-1 text-xs rounded-full bg-red-100 text-red-800 border border-red-300">
-          🚪 Check Out
+        <span className="px-3 py-1 text-xs rounded-full bg-red-100 text-red-800 border border-red-300 font-medium">
+          Check Out
         </span>
       );
     }
     return (
-      <span className="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-800">
+      <span className="px-3 py-1 text-xs rounded-full bg-gray-100 text-gray-800 font-medium">
         {status || 'Unknown'}
       </span>
     );
@@ -268,7 +253,6 @@ export default function AttendanceView() {
                         <th className="text-left py-3 px-4 font-semibold text-gray-700">Check Out</th>
                         <th className="text-left py-3 px-4 font-semibold text-gray-700">Total Hours</th>
                         <th className="text-left py-3 px-4 font-semibold text-gray-700">Status</th>
-                        <th className="text-left py-3 px-4 font-semibold text-gray-700">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -293,21 +277,11 @@ export default function AttendanceView() {
                               </span>
                             </td>
                             <td className="py-3 px-4">{getStatusBadge(record)}</td>
-                            <td className="py-3 px-4">
-                              {!record.check_out && !record.anomaly_type && (
-                                <button
-                                  onClick={() => handleManualCheckout(record.employee_id)}
-                                  className="text-sm text-blue-600 hover:text-blue-800 font-medium"
-                                >
-                                  Manual Checkout
-                                </button>
-                              )}
-                            </td>
                           </tr>
                         ))
                       ) : (
                         <tr>
-                          <td colSpan="6" className="text-center py-12 text-gray-500">
+                          <td colSpan="5" className="text-center py-12 text-gray-500">
                             No attendance records for this date
                           </td>
                         </tr>
@@ -373,7 +347,6 @@ export default function AttendanceView() {
                         <th className="text-left py-3 px-4 font-semibold text-gray-700">Check In</th>
                         <th className="text-left py-3 px-4 font-semibold text-gray-700">Check Out</th>
                         <th className="text-left py-3 px-4 font-semibold text-gray-700">Issue</th>
-                        <th className="text-left py-3 px-4 font-semibold text-gray-700">Action</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -390,21 +363,11 @@ export default function AttendanceView() {
                             <td className="py-3 px-4 text-gray-900">{formatTime(record.check_in)}</td>
                             <td className="py-3 px-4 text-gray-900">{formatTime(record.check_out)}</td>
                             <td className="py-3 px-4">{getStatusBadge(record)}</td>
-                            <td className="py-3 px-4">
-                              {!record.check_out && (
-                                <button
-                                  onClick={() => handleManualCheckout(record.employee_id)}
-                                  className="text-sm px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
-                                >
-                                  Fix Checkout
-                                </button>
-                              )}
-                            </td>
                           </tr>
                         ))
                       ) : (
                         <tr>
-                          <td colSpan="6" className="text-center py-12 text-gray-500">
+                          <td colSpan="5" className="text-center py-12 text-gray-500">
                             <div className="flex flex-col items-center gap-2">
                               <TrendingUp className="w-12 h-12 text-green-500" />
                               <p className="font-medium">No anomalies found!</p>

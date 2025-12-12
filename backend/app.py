@@ -1,6 +1,7 @@
 """
 Hikvision EMS Backend API with Server-Sent Events (SSE)
 Updated to handle explicit Check-In/Check-Out status from device
+WITH PROPER ANOMALY DETECTION
 """
 
 from flask import Flask, request, jsonify, Response
@@ -39,6 +40,7 @@ hikvision = HikvisionService()
 notification_queues = []
 notification_lock = threading.Lock()
 
+
 def broadcast_event(event_type, data):
     """Broadcast event to all connected SSE clients"""
     message = json.dumps({
@@ -60,6 +62,7 @@ def broadcast_event(event_type, data):
             notification_queues.remove(q)
     
     logger.info(f"📡 Broadcasted event: {event_type}")
+
 
 # ============================================
 # SSE ENDPOINT
@@ -87,6 +90,7 @@ def event_stream():
     
     return Response(generate(), mimetype='text/event-stream')
 
+
 # ============================================
 # CUSTOM ERROR HANDLER
 # ============================================
@@ -96,6 +100,7 @@ class APIError(Exception):
         self.message = message
         self.status_code = status_code
 
+
 @app.errorhandler(APIError)
 def handle_api_error(error):
     logger.error(f"API Error: {error.message}")
@@ -104,12 +109,14 @@ def handle_api_error(error):
         'message': error.message
     }), error.status_code
 
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({
         'success': False,
         'message': 'Endpoint not found'
     }), 404
+
 
 @app.errorhandler(Exception)
 def handle_unexpected_error(error):
@@ -118,6 +125,7 @@ def handle_unexpected_error(error):
         'success': False,
         'message': 'An unexpected error occurred'
     }), 500
+
 
 # ============================================
 # EMPLOYEE ROUTES
@@ -130,12 +138,16 @@ def get_employees():
         conn = get_db()
         cursor = conn.cursor()
         
-        status = request.args.get('status', 'active')
+        status = request.args.get('status')
         search = request.args.get('search', '')
         department = request.args.get('department', '')
         
-        query = "SELECT * FROM employees WHERE status = ?"
-        params = [status]
+        query = "SELECT * FROM employees WHERE 1=1"
+        params = []
+        
+        if status:
+            query += " AND status = ?"
+            params.append(status)
         
         if search:
             query += " AND (name LIKE ? OR employee_id LIKE ?)"
@@ -163,6 +175,7 @@ def get_employees():
         logger.error(f"Error fetching employees: {str(e)}")
         raise APIError("Failed to fetch employees", 500)
 
+
 @app.route('/api/employees/<employee_id>', methods=['GET'])
 def get_employee(employee_id):
     """Get single employee with attendance stats"""
@@ -182,13 +195,49 @@ def get_employee(employee_id):
         cursor.execute("""
             SELECT 
                 COUNT(*) as days_present,
-                COUNT(CASE WHEN anomaly_type IS NOT NULL THEN 1 END) as anomaly_count
+                SUM(CASE WHEN anomaly_type IS NOT NULL THEN 1 ELSE 0 END) as anomaly_count
             FROM daily_attendance 
             WHERE employee_id = ?
         """, (employee_id,))
         
         stats = cursor.fetchone()
-        employee['attendance_stats'] = dict(stats) if stats else {}
+        
+        # Get monthly hours (current month)
+        now = datetime.now()
+        first_day = now.replace(day=1).strftime('%Y-%m-%d')
+        
+        cursor.execute("""
+            SELECT total_hours
+            FROM daily_attendance
+            WHERE employee_id = ?
+            AND date >= ?
+            AND check_out IS NOT NULL
+        """, (employee_id, first_day))
+        
+        monthly_records = cursor.fetchall()
+        
+        # Calculate monthly total
+        total_seconds = 0
+        for record in monthly_records:
+            if record['total_hours'] and record['total_hours'] != '0:00:00':
+                try:
+                    parts = record['total_hours'].split(':')
+                    hours = int(parts[0])
+                    minutes = int(parts[1])
+                    seconds = int(parts[2]) if len(parts) > 2 else 0
+                    total_seconds += hours * 3600 + minutes * 60 + seconds
+                except:
+                    pass
+        
+        total_hours = total_seconds // 3600
+        total_minutes = (total_seconds % 3600) // 60
+        monthly_total = f"{total_hours}h {total_minutes}m"
+        
+        employee['attendance_stats'] = {
+            'days_present': stats['days_present'] or 0,
+            'anomaly_count': stats['anomaly_count'] or 0,
+            'monthly_hours': monthly_total
+        }
         
         # Get recent attendance
         cursor.execute("""
@@ -214,6 +263,7 @@ def get_employee(employee_id):
         logger.error(f"Error fetching employee: {str(e)}")
         raise APIError("Failed to fetch employee", 500)
 
+
 @app.route('/api/employees/register', methods=['POST'])
 def register_employee():
     """Register new employee"""
@@ -221,7 +271,7 @@ def register_employee():
         data = request.json
         
         # Validate required fields
-        required = ['employee_id', 'name', 'position']
+        required = ['employee_id', 'name']
         for field in required:
             if not data.get(field):
                 raise APIError(f"Missing required field: {field}", 400)
@@ -251,7 +301,7 @@ def register_employee():
             data.get('email'),
             data.get('phone'),
             data.get('department', 'General'),
-            data['position'],
+            data.get('position', 'Staff'),
             datetime.now().strftime('%Y-%m-%d')
         ))
         
@@ -290,6 +340,7 @@ def register_employee():
     except Exception as e:
         logger.error(f"Registration error: {str(e)}")
         raise APIError("Registration failed", 500)
+
 
 @app.route('/api/employees/<employee_id>', methods=['PUT'])
 def update_employee(employee_id):
@@ -333,6 +384,7 @@ def update_employee(employee_id):
         logger.error(f"Update error: {str(e)}")
         raise APIError("Failed to update employee", 500)
 
+
 @app.route('/api/employees/<employee_id>', methods=['DELETE'])
 def delete_employee(employee_id):
     """Deactivate employee"""
@@ -372,15 +424,16 @@ def delete_employee(employee_id):
         logger.error(f"Delete error: {str(e)}")
         raise APIError("Failed to delete employee", 500)
 
+
 # ============================================
-# ATTENDANCE ROUTES (NEW LOGIC)
+# ATTENDANCE ROUTES (FIXED LOGIC)
 # ============================================
 
 @app.route('/event', methods=['POST'])
 def receive_attendance_event():
     """
     Receive scan event from Hikvision device
-    NOW WITH EXPLICIT attendanceStatus HANDLING
+    WITH PROPER CHECKOUT WITHOUT CHECKIN DETECTION
     """
     try:
         data = None
@@ -410,7 +463,7 @@ def receive_attendance_event():
         
         employee_id = event.get('employeeNoString', 'Unknown')
         name = event.get('name', 'Unknown')
-        attendance_status = event.get('attendanceStatus', 'unknown')  # NEW: Get explicit status
+        attendance_status = event.get('attendanceStatus', 'unknown')
         
         # Get verification mode
         sub_type = event.get('subEventType', 0)
@@ -468,10 +521,11 @@ def receive_attendance_event():
         logger.error(f"Event processing error: {str(e)}")
         return jsonify({'success': False, 'message': 'Processed with error'}), 200
 
+
 def process_attendance_status(cursor, employee_id, name, attendance_status, date, time):
     """
     Process attendance based on explicit status from device
-    Returns: action taken ('check_in', 'check_out', 'anomaly_detected')
+    FIXED: Properly detects checkout without checkin
     """
     
     # Get today's record if exists
@@ -504,64 +558,77 @@ def process_attendance_status(cursor, employee_id, name, attendance_status, date
             return 'check_in_updated'
         
         else:
-            # Already completed (check-in + check-out) - ANOMALY
-            cursor.execute("""
-                UPDATE daily_attendance 
-                SET anomaly_type = 'multiple_checkins',
-                    notes = 'User checked in again after checkout',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE employee_id = ? AND date = ?
-            """, (employee_id, date))
-            logger.warning(f"⚠️ ANOMALY: {name} checked in after completing day")
-            return 'anomaly_multiple_checkin'
+            # Already completed (check-in + check-out) - Could be second shift
+            logger.warning(f"⚠️ MULTIPLE SHIFTS: {name} checked in again after completing day")
+            return 'multiple_checkin'
     
     # ====== SCENARIO 2: CHECK OUT ======
     elif attendance_status.lower() == 'checkout':
+        
+        # **KEY FIX: Check if NO record exists at all**
         if not existing:
-            # Checkout without check-in - ANOMALY
+            # ❌ ANOMALY: Checkout without any check-in record
             cursor.execute("""
                 INSERT INTO daily_attendance 
-                (employee_id, name, date, check_out, status, anomaly_type)
-                VALUES (?, ?, ?, ?, 'incomplete', 'checkout_without_checkin')
+                (employee_id, name, date, check_in, check_out, total_hours, status, anomaly_type)
+                VALUES (?, ?, ?, NULL, ?, '0:00:00', 'incomplete', 'checkout_without_checkin')
             """, (employee_id, name, date, time))
-            logger.warning(f"⚠️ ANOMALY: {name} checked out without checking in at {time}")
+            logger.warning(f"❌ ANOMALY: {name} checked out WITHOUT checking in! Time: {time}")
             return 'anomaly_checkout_without_checkin'
         
+        # Record exists - check if it has check_in
         elif existing['check_in'] is None:
-            # Has record but no check-in - ANOMALY
+            # Has record but no check-in (edge case) - ANOMALY
             cursor.execute("""
                 UPDATE daily_attendance 
-                SET check_out = ?, anomaly_type = 'checkout_without_checkin', updated_at = CURRENT_TIMESTAMP
+                SET check_out = ?, 
+                    total_hours = '0:00:00',
+                    anomaly_type = 'checkout_without_checkin',
+                    status = 'incomplete',
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE employee_id = ? AND date = ?
             """, (time, employee_id, date))
-            logger.warning(f"⚠️ ANOMALY: {name} checkout without checkin")
+            logger.warning(f"⚠️ ANOMALY: {name} checkout without checkin (edge case)")
             return 'anomaly_checkout_without_checkin'
         
-        else:
+        # Normal case - has check_in
+        elif existing['check_out'] is None:
             # Normal checkout - Calculate duration
             check_in_time = datetime.strptime(existing['check_in'], '%H:%M:%S')
             check_out_time = datetime.strptime(time, '%H:%M:%S')
             
             # Handle night shift (checkout next day)
+            anomaly_type = None
             if check_out_time < check_in_time:
                 check_out_time += timedelta(days=1)
+                anomaly_type = 'late_checkout'
             
             duration = check_out_time - check_in_time
             hours_str = str(duration).split('.')[0]  # Format: HH:MM:SS
             
             cursor.execute("""
                 UPDATE daily_attendance 
-                SET check_out = ?, total_hours = ?, updated_at = CURRENT_TIMESTAMP
+                SET check_out = ?, 
+                    total_hours = ?,
+                    anomaly_type = ?,
+                    status = 'present',
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE employee_id = ? AND date = ?
-            """, (time, hours_str, employee_id, date))
+            """, (time, hours_str, anomaly_type, employee_id, date))
             
             logger.info(f"✅ CHECK-OUT: {name} at {time} (Duration: {hours_str})")
             return 'check_out'
+        
+        else:
+            # Already checked out - duplicate
+            logger.warning(f"⚠️ DUPLICATE CHECK-OUT: {name} at {time} (Ignored)")
+            return 'duplicate_checkout'
     
     # ====== SCENARIO 3: Unknown Status ======
     else:
         logger.warning(f"⚠️ Unknown attendance status: {attendance_status}")
         return 'unknown_status'
+
 
 @app.route('/api/attendance/daily', methods=['GET'])
 def get_daily_attendance():
@@ -593,6 +660,7 @@ def get_daily_attendance():
     except Exception as e:
         logger.error(f"Error fetching daily attendance: {str(e)}")
         raise APIError("Failed to fetch attendance", 500)
+
 
 @app.route('/api/attendance/logs', methods=['GET'])
 def get_attendance_logs():
@@ -630,9 +698,10 @@ def get_attendance_logs():
         logger.error(f"Error fetching logs: {str(e)}")
         raise APIError("Failed to fetch logs", 500)
 
+
 @app.route('/api/attendance/anomalies', methods=['GET'])
 def get_anomalies():
-    """Get all records with anomalies"""
+    """Get all records with anomalies for a specific date"""
     try:
         date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
         
@@ -653,65 +722,85 @@ def get_anomalies():
         return jsonify({
             'success': True,
             'data': anomalies,
-            'count': len(anomalies)
+            'count': len(anomalies),
+            'date': date
         }), 200
         
     except Exception as e:
         logger.error(f"Error fetching anomalies: {str(e)}")
         raise APIError("Failed to fetch anomalies", 500)
 
-@app.route('/api/attendance/monthly-total/<employee_id>', methods=['GET'])
-def get_monthly_total(employee_id):
-    """Get total hours worked this month for an employee"""
+
+@app.route('/api/attendance/manual-checkout', methods=['POST'])
+def manual_checkout():
+    """Manually record checkout for employee"""
     try:
-        year = request.args.get('year', datetime.now().year)
-        month = request.args.get('month', datetime.now().month)
+        data = request.json
+        employee_id = data.get('employee_id')
+        checkout_time = data.get('checkout_time')
+        date = data.get('date', datetime.now().strftime('%Y-%m-%d'))
+        
+        if not employee_id or not checkout_time:
+            raise APIError("Missing employee_id or checkout_time", 400)
         
         conn = get_db()
         cursor = conn.cursor()
         
+        # Get record
         cursor.execute("""
-            SELECT 
-                COUNT(*) as days_worked,
-                SUM(
-                    CAST(substr(total_hours, 1, 2) AS INTEGER) * 3600 +
-                    CAST(substr(total_hours, 4, 2) AS INTEGER) * 60 +
-                    CAST(substr(total_hours, 7, 2) AS INTEGER)
-                ) as total_seconds
-            FROM daily_attendance
-            WHERE employee_id = ?
-            AND strftime('%Y', date) = ?
-            AND strftime('%m', date) = ?
-            AND check_out IS NOT NULL
-        """, (employee_id, str(year), str(month).zfill(2)))
+            SELECT * FROM daily_attendance
+            WHERE employee_id = ? AND date = ?
+        """, (employee_id, date))
         
-        result = cursor.fetchone()
+        record = cursor.fetchone()
         
-        days_worked = result['days_worked'] or 0
-        total_seconds = result['total_seconds'] or 0
+        if not record:
+            raise APIError("No attendance record found for this date", 404)
         
-        # Convert seconds back to HH:MM:SS
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        seconds = total_seconds % 60
-        total_hours_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        if record['check_in']:
+            # Calculate duration
+            check_in_time = datetime.strptime(record['check_in'], '%H:%M:%S')
+            check_out_time = datetime.strptime(checkout_time, '%H:%M:%S')
+            
+            if check_out_time < check_in_time:
+                check_out_time += timedelta(days=1)
+            
+            duration = check_out_time - check_in_time
+            duration_str = str(duration).split('.')[0]
+            
+            cursor.execute("""
+                UPDATE daily_attendance
+                SET check_out = ?, total_hours = ?, anomaly_type = NULL, status = 'present'
+                WHERE employee_id = ? AND date = ?
+            """, (checkout_time, duration_str, employee_id, date))
+        else:
+            cursor.execute("""
+                UPDATE daily_attendance
+                SET check_out = ?, total_hours = '0:00:00'
+                WHERE employee_id = ? AND date = ?
+            """, (checkout_time, employee_id, date))
         
+        conn.commit()
         conn.close()
+        
+        # Broadcast
+        broadcast_event('manual_checkout', {
+            'employee_id': employee_id,
+            'date': date,
+            'checkout_time': checkout_time
+        })
         
         return jsonify({
             'success': True,
-            'data': {
-                'employee_id': employee_id,
-                'year': year,
-                'month': month,
-                'days_worked': days_worked,
-                'total_hours': total_hours_str
-            }
+            'message': 'Manual checkout recorded'
         }), 200
         
+    except APIError:
+        raise
     except Exception as e:
-        logger.error(f"Error calculating monthly total: {str(e)}")
-        raise APIError("Failed to calculate monthly total", 500)
+        logger.error(f"Manual checkout error: {str(e)}")
+        raise APIError("Failed to record manual checkout", 500)
+
 
 # ============================================
 # DASHBOARD ROUTES
@@ -783,6 +872,7 @@ def get_dashboard_stats():
         logger.error(f"Error fetching dashboard stats: {str(e)}")
         raise APIError("Failed to fetch dashboard stats", 500)
 
+
 # ============================================
 # SYSTEM ROUTES
 # ============================================
@@ -803,6 +893,7 @@ def health_check():
             'connected_clients': len(notification_queues)
         }
     }), 200
+
 
 @app.route('/api/system/departments', methods=['GET'])
 def get_departments():
@@ -825,6 +916,7 @@ def get_departments():
     except Exception as e:
         raise APIError("Failed to fetch departments", 500)
 
+
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
@@ -839,6 +931,7 @@ def get_verify_mode(code):
         25: "Card"
     }
     return modes.get(code, f"Code-{code}")
+
 
 # ============================================
 # MAIN
