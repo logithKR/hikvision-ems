@@ -5,16 +5,16 @@ import { toast } from 'react-toastify';
 import { 
   Search, 
   UserX, 
-  Trash2,
-  RefreshCw,
-  Wifi
+  Trash2, 
+  RefreshCw, 
+  Wifi,
+  Calendar
 } from 'lucide-react';
 
 export default function EmployeeList() {
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [departmentFilter, setDepartmentFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('active');
   const [connected, setConnected] = useState(false);
 
@@ -22,15 +22,14 @@ export default function EmployeeList() {
     setLoading(true);
     try {
       const params = {
-        status: statusFilter,
-        department: departmentFilter,
+        status: statusFilter === '' ? undefined : statusFilter,
         search: searchTerm
       };
-      
       const response = await employeeAPI.getAll(params);
       setEmployees(response.data.data);
     } catch (error) {
       console.error('Error fetching employees:', error);
+      toast.error('Failed to fetch employees');
     } finally {
       setLoading(false);
     }
@@ -46,15 +45,15 @@ export default function EmployeeList() {
     // Listen for employee added event
     const handleEmployeeAdded = (data) => {
       console.log('🔔 Employee added:', data);
-      toast.success(`${data.name} added to system`);
-      fetchEmployees(); // Only refresh when employee is added
+      toast.success(`${data.name} added to system`, { icon: '👤' });
+      fetchEmployees();
     };
 
     // Listen for employee deleted event
     const handleEmployeeDeleted = (data) => {
       console.log('🔔 Employee deleted:', data);
       toast.info('Employee deactivated');
-      fetchEmployees(); // Only refresh when employee is deleted
+      fetchEmployees();
     };
 
     eventService.on('employee_added', handleEmployeeAdded);
@@ -65,7 +64,7 @@ export default function EmployeeList() {
       eventService.off('employee_added', handleEmployeeAdded);
       eventService.off('employee_deleted', handleEmployeeDeleted);
     };
-  }, [statusFilter, departmentFilter]);
+  }, [statusFilter]);
 
   const handleDelete = async (employeeId, name) => {
     if (!window.confirm(`Are you sure you want to deactivate ${name}?`)) {
@@ -75,50 +74,69 @@ export default function EmployeeList() {
     try {
       await employeeAPI.delete(employeeId);
       toast.success('Employee deactivated successfully');
-      // No need to manually refresh - event will trigger it
     } catch (error) {
       console.error('Error deleting employee:', error);
+      toast.error('Failed to deactivate employee');
     }
   };
 
-  const filteredEmployees = employees.filter(emp => 
+  const filteredEmployees = employees.filter(emp =>
     emp.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     emp.employee_id.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  const getStatusBadge = (status) => {
+    if (status === 'active') {
+      return (
+        <span className="px-3 py-1 text-xs rounded-full bg-green-100 text-green-800 border border-green-300 font-medium">
+          ✓ Active
+        </span>
+      );
+    }
+    return (
+      <span className="px-3 py-1 text-xs rounded-full bg-gray-100 text-gray-800 border border-gray-300 font-medium">
+        ⊘ Inactive
+      </span>
+    );
+  };
+
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Employees</h1>
-          <p className="text-gray-500 mt-1">Manage employee records</p>
+          <h1 className="text-3xl font-bold text-gray-900">Employee Management</h1>
+          <p className="text-gray-600 mt-1">Manage employee records</p>
         </div>
-        <div className="flex items-center space-x-3">
-          {/* Live indicator */}
-          <div className={`flex items-center space-x-2 px-4 py-2 rounded-lg ${
-            connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-          }`}>
-            <Wifi size={18} className={connected ? 'animate-pulse' : ''} />
-            <span className="text-sm font-medium">
-              {connected ? 'Live' : 'Disconnected'}
+        <div className="flex items-center gap-3">
+          {connected && (
+            <span className="flex items-center gap-2 text-sm text-green-600">
+              <Wifi className="w-4 h-4" />
+              Live
             </span>
-          </div>
+          )}
+          <button
+            onClick={() => fetchEmployees()}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Refresh
+          </button>
         </div>
       </div>
 
       {/* Filters */}
-      <div className="card">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Search */}
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
             <input
               type="text"
               placeholder="Search by name or ID..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="input-field pl-10"
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
 
@@ -126,119 +144,108 @@ export default function EmployeeList() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="input-field"
+            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           >
-            <option value="active">Active</option>
-            <option value="inactive">Inactive</option>
+            <option value="active">Active Only</option>
+            <option value="inactive">Inactive Only</option>
+            <option value="">All Employees</option>
           </select>
-
-          {/* Refresh */}
-          <button
-            onClick={fetchEmployees}
-            className="btn-secondary flex items-center justify-center space-x-2"
-          >
-            <RefreshCw size={18} />
-            <span>Refresh</span>
-          </button>
         </div>
       </div>
 
       {/* Employee Table */}
-      <div className="card overflow-hidden">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-          </div>
-        ) : filteredEmployees.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Employee
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Contact
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Department
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Position
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {filteredEmployees.map((employee) => (
-                  <tr key={employee.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div>
-                        <div className="text-sm font-medium text-gray-900">
-                          {employee.name}
-                        </div>
-                        <div className="text-sm text-gray-500">
-                          {employee.employee_id}
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">{employee.email || '-'}</div>
-                      <div className="text-sm text-gray-500">{employee.phone || '-'}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="badge badge-info">{employee.department}</span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {employee.position}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`badge ${
-                        employee.status === 'active' ? 'badge-success' : 'badge-gray'
-                      }`}>
-                        {employee.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <button
-                        onClick={() => handleDelete(employee.employee_id, employee.name)}
-                        className="text-red-600 hover:text-red-900 ml-4"
-                        title="Deactivate"
-                      >
-                        <Trash2 size={18} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <RefreshCw className="w-8 h-8 animate-spin text-blue-500" />
           </div>
         ) : (
-          <div className="text-center py-12">
-            <UserX className="mx-auto text-gray-400 mb-4" size={48} />
-            <p className="text-gray-500">No employees found</p>
-          </div>
-        )}
-      </div>
-
-      {/* Stats Footer */}
-      <div className="card">
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-gray-600">
-            Showing <span className="font-medium">{filteredEmployees.length}</span> employees
-          </p>
-          {connected && (
-            <div className="flex items-center space-x-2 text-green-600">
-              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-              <span className="text-xs font-medium">Live updates enabled</span>
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50">
+                  <tr className="border-b border-gray-200">
+                    <th className="text-left py-4 px-6 font-semibold text-gray-700">Employee ID</th>
+                    <th className="text-left py-4 px-6 font-semibold text-gray-700">Name</th>
+                    <th className="text-left py-4 px-6 font-semibold text-gray-700">Date Joined</th>
+                    <th className="text-left py-4 px-6 font-semibold text-gray-700">Status</th>
+                    <th className="text-left py-4 px-6 font-semibold text-gray-700">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredEmployees.length > 0 ? (
+                    filteredEmployees.map((employee) => (
+                      <tr 
+                        key={employee.id}
+                        className="border-b border-gray-100 hover:bg-gray-50 transition"
+                      >
+                        <td className="py-4 px-6">
+                          <span className="font-mono font-semibold text-gray-900">
+                            {employee.employee_id}
+                          </span>
+                        </td>
+                        <td className="py-4 px-6">
+                          <p className="font-semibold text-gray-900">{employee.name}</p>
+                        </td>
+                        <td className="py-4 px-6">
+                          <div className="flex items-center gap-2">
+                            <Calendar className="w-4 h-4 text-gray-400" />
+                            <span className="text-gray-600">
+                              {employee.date_joined 
+                                ? new Date(employee.date_joined).toLocaleDateString('en-US', {
+                                    year: 'numeric',
+                                    month: 'short',
+                                    day: 'numeric'
+                                  })
+                                : '-'}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="py-4 px-6">
+                          {getStatusBadge(employee.status)}
+                        </td>
+                        <td className="py-4 px-6">
+                          <button
+                            onClick={() => handleDelete(employee.employee_id, employee.name)}
+                            className="text-red-600 hover:text-red-800 p-2 hover:bg-red-50 rounded-lg transition"
+                            title="Deactivate Employee"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan="5" className="text-center py-12">
+                        <UserX className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                        <p className="text-gray-500 font-medium">No employees found</p>
+                        <p className="text-sm text-gray-400 mt-1">
+                          Try adjusting your search or filters
+                        </p>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-          )}
-        </div>
+
+            {/* Footer */}
+            <div className="bg-gray-50 px-6 py-4 border-t border-gray-200">
+              <div className="flex items-center justify-between text-sm">
+                <p className="text-gray-600">
+                  Showing <span className="font-semibold text-gray-900">{filteredEmployees.length}</span> {statusFilter === '' ? 'total' : statusFilter} employees
+                </p>
+                {connected && (
+                  <div className="flex items-center gap-2 text-green-600">
+                    <Wifi className="w-4 h-4" />
+                    <span>Real-time updates enabled</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

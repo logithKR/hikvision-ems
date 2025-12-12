@@ -1,6 +1,6 @@
 """
 Hikvision EMS Backend API with Server-Sent Events (SSE)
-Complete implementation - No polling needed
+Updated to handle explicit Check-In/Check-Out status from device
 """
 
 from flask import Flask, request, jsonify, Response
@@ -15,12 +15,9 @@ import os
 from dotenv import load_dotenv
 import queue
 import threading
-<<<<<<< HEAD
 
 # --- IMPORT THE NEW SYNC MODULE ---
 import user  # This imports your user.py file
-=======
->>>>>>> 063b7682ac44fb8019c76d9a947a515450dfd168
 
 load_dotenv()
 
@@ -152,8 +149,8 @@ def get_employees():
         
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        
         employees = [dict(row) for row in rows]
+        
         conn.close()
         
         return jsonify({
@@ -185,7 +182,7 @@ def get_employee(employee_id):
         cursor.execute("""
             SELECT 
                 COUNT(*) as days_present,
-                COUNT(CASE WHEN check_out IS NULL THEN 1 END) as missed_checkout
+                COUNT(CASE WHEN anomaly_type IS NOT NULL THEN 1 END) as anomaly_count
             FROM daily_attendance 
             WHERE employee_id = ?
         """, (employee_id,))
@@ -197,7 +194,7 @@ def get_employee(employee_id):
         cursor.execute("""
             SELECT * FROM daily_attendance 
             WHERE employee_id = ?
-            ORDER BY date DESC
+            ORDER BY date DESC 
             LIMIT 10
         """, (employee_id,))
         
@@ -229,7 +226,7 @@ def register_employee():
             if not data.get(field):
                 raise APIError(f"Missing required field: {field}", 400)
         
-        # Validate employee_id format (alphanumeric)
+        # Validate employee_id format
         if not data['employee_id'].replace('_', '').replace('-', '').isalnum():
             raise APIError("Invalid employee ID format", 400)
         
@@ -269,7 +266,7 @@ def register_employee():
         
         logger.info(f"✅ Employee registered: {data['name']} ({data['employee_id']})")
         
-        # Broadcast event to all connected clients
+        # Broadcast event
         broadcast_event('employee_added', {
             'employee_id': data['employee_id'],
             'name': data['name'],
@@ -288,7 +285,7 @@ def register_employee():
         
     except APIError:
         raise
-    except sqlite3.IntegrityError as e:
+    except sqlite3.IntegrityError:
         raise APIError("Database integrity error", 400)
     except Exception as e:
         logger.error(f"Registration error: {str(e)}")
@@ -299,6 +296,7 @@ def update_employee(employee_id):
     """Update employee details"""
     try:
         data = request.json
+        
         conn = get_db()
         cursor = conn.cursor()
         
@@ -351,6 +349,7 @@ def delete_employee(employee_id):
             "UPDATE employees SET status = 'inactive' WHERE employee_id = ?",
             (employee_id,)
         )
+        
         conn.commit()
         conn.close()
         
@@ -374,16 +373,19 @@ def delete_employee(employee_id):
         raise APIError("Failed to delete employee", 500)
 
 # ============================================
-# ATTENDANCE ROUTES
+# ATTENDANCE ROUTES (NEW LOGIC)
 # ============================================
 
 @app.route('/event', methods=['POST'])
 def receive_attendance_event():
-    """Receive scan event from Hikvision device"""
+    """
+    Receive scan event from Hikvision device
+    NOW WITH EXPLICIT attendanceStatus HANDLING
+    """
     try:
         data = None
-
-        # 1. Handle Multipart Data (FIX for 415 Error)
+        
+        # 1. Handle Multipart Data
         if request.form:
             event_log = request.form.get('event_log')
             if event_log:
@@ -392,23 +394,25 @@ def receive_attendance_event():
                 except json.JSONDecodeError:
                     pass
         
-        # 2. Handle Standard JSON (Fallback)
+        # 2. Handle Standard JSON
         elif request.is_json:
             data = request.json
         
         # 3. Filter Heartbeats
         if not data:
             return jsonify({'success': True, 'message': 'Heartbeat ignored'}), 200
-
-        # 4. Process Real Data
+        
+        # 4. Process Real Event
         if 'AccessControllerEvent' not in data:
             return jsonify({'success': True, 'message': 'No Access Event found'}), 200
         
         event = data['AccessControllerEvent']
+        
         employee_id = event.get('employeeNoString', 'Unknown')
         name = event.get('name', 'Unknown')
+        attendance_status = event.get('attendanceStatus', 'unknown')  # NEW: Get explicit status
         
-        # Get detailed verification mode
+        # Get verification mode
         sub_type = event.get('subEventType', 0)
         verify_mode = get_verify_mode(sub_type)
         
@@ -424,57 +428,28 @@ def receive_attendance_event():
         conn = get_db()
         cursor = conn.cursor()
         
-        # 1. Save to logs
+        # 1. ALWAYS save to attendance_logs (Raw history)
         cursor.execute("""
-            INSERT INTO attendance_logs (employee_id, name, verify_mode, scan_time)
-            VALUES (?, ?, ?, ?)
-        """, (employee_id, name, verify_mode, scan_time))
+            INSERT INTO attendance_logs (employee_id, name, attendance_status, verify_mode, scan_time)
+            VALUES (?, ?, ?, ?, ?)
+        """, (employee_id, name, attendance_status, verify_mode, scan_time))
         
-        # 2. Update daily attendance
-        cursor.execute(
-            "SELECT check_in FROM daily_attendance WHERE employee_id = ? AND date = ?",
-            (employee_id, today_date)
+        # 2. Process based on attendanceStatus
+        action_taken = process_attendance_status(
+            cursor, employee_id, name, attendance_status, today_date, current_time
         )
-        existing = cursor.fetchone()
-        
-        action = ""
-        
-        if not existing:
-            # First scan = check-in
-            cursor.execute("""
-                INSERT INTO daily_attendance (employee_id, name, date, check_in, status)
-                VALUES (?, ?, ?, ?, 'present')
-            """, (employee_id, name, today_date, current_time))
-            logger.info(f"✅ CHECK-IN: {name} at {current_time}")
-            action = "check_in"
-            
-        else:
-            # Second scan = check-out
-            check_in_time = datetime.strptime(existing['check_in'], '%H:%M:%S')
-            check_out_time = datetime.strptime(current_time, '%H:%M:%S')
-            duration = check_out_time - check_in_time
-            
-            hours_str = str(duration).split('.')[0]
-            
-            cursor.execute("""
-                UPDATE daily_attendance 
-                SET check_out = ?, total_hours = ?
-                WHERE employee_id = ? AND date = ?
-            """, (current_time, hours_str, employee_id, today_date))
-            
-            logger.info(f"✅ CHECK-OUT: {name} at {current_time} (Duration: {hours_str})")
-            action = "check_out"
         
         conn.commit()
         conn.close()
         
-        # Broadcast event to all connected clients
+        # Broadcast event
         broadcast_event('attendance_scan', {
             'employee_id': employee_id,
             'name': name,
+            'attendance_status': attendance_status,
             'verify_mode': verify_mode,
             'scan_time': scan_time,
-            'action': action
+            'action': action_taken
         })
         
         return jsonify({
@@ -483,7 +458,8 @@ def receive_attendance_event():
             'data': {
                 'employee_id': employee_id,
                 'name': name,
-                'action': action,
+                'status': attendance_status,
+                'action': action_taken,
                 'time': current_time
             }
         }), 200
@@ -491,6 +467,101 @@ def receive_attendance_event():
     except Exception as e:
         logger.error(f"Event processing error: {str(e)}")
         return jsonify({'success': False, 'message': 'Processed with error'}), 200
+
+def process_attendance_status(cursor, employee_id, name, attendance_status, date, time):
+    """
+    Process attendance based on explicit status from device
+    Returns: action taken ('check_in', 'check_out', 'anomaly_detected')
+    """
+    
+    # Get today's record if exists
+    cursor.execute("""
+        SELECT * FROM daily_attendance 
+        WHERE employee_id = ? AND date = ?
+    """, (employee_id, date))
+    
+    existing = cursor.fetchone()
+    
+    # ====== SCENARIO 1: CHECK IN ======
+    if attendance_status.lower() == 'checkin':
+        if not existing:
+            # First check-in of the day - NORMAL
+            cursor.execute("""
+                INSERT INTO daily_attendance (employee_id, name, date, check_in, status)
+                VALUES (?, ?, ?, ?, 'present')
+            """, (employee_id, name, date, time))
+            logger.info(f"✅ CHECK-IN: {name} at {time}")
+            return 'check_in'
+        
+        elif existing['check_out'] is None:
+            # Already checked in, no checkout yet - UPDATE check-in time
+            cursor.execute("""
+                UPDATE daily_attendance 
+                SET check_in = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE employee_id = ? AND date = ?
+            """, (time, employee_id, date))
+            logger.warning(f"⚠️ DUPLICATE CHECK-IN: {name} at {time} (Updated)")
+            return 'check_in_updated'
+        
+        else:
+            # Already completed (check-in + check-out) - ANOMALY
+            cursor.execute("""
+                UPDATE daily_attendance 
+                SET anomaly_type = 'multiple_checkins',
+                    notes = 'User checked in again after checkout',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE employee_id = ? AND date = ?
+            """, (employee_id, date))
+            logger.warning(f"⚠️ ANOMALY: {name} checked in after completing day")
+            return 'anomaly_multiple_checkin'
+    
+    # ====== SCENARIO 2: CHECK OUT ======
+    elif attendance_status.lower() == 'checkout':
+        if not existing:
+            # Checkout without check-in - ANOMALY
+            cursor.execute("""
+                INSERT INTO daily_attendance 
+                (employee_id, name, date, check_out, status, anomaly_type)
+                VALUES (?, ?, ?, ?, 'incomplete', 'checkout_without_checkin')
+            """, (employee_id, name, date, time))
+            logger.warning(f"⚠️ ANOMALY: {name} checked out without checking in at {time}")
+            return 'anomaly_checkout_without_checkin'
+        
+        elif existing['check_in'] is None:
+            # Has record but no check-in - ANOMALY
+            cursor.execute("""
+                UPDATE daily_attendance 
+                SET check_out = ?, anomaly_type = 'checkout_without_checkin', updated_at = CURRENT_TIMESTAMP
+                WHERE employee_id = ? AND date = ?
+            """, (time, employee_id, date))
+            logger.warning(f"⚠️ ANOMALY: {name} checkout without checkin")
+            return 'anomaly_checkout_without_checkin'
+        
+        else:
+            # Normal checkout - Calculate duration
+            check_in_time = datetime.strptime(existing['check_in'], '%H:%M:%S')
+            check_out_time = datetime.strptime(time, '%H:%M:%S')
+            
+            # Handle night shift (checkout next day)
+            if check_out_time < check_in_time:
+                check_out_time += timedelta(days=1)
+            
+            duration = check_out_time - check_in_time
+            hours_str = str(duration).split('.')[0]  # Format: HH:MM:SS
+            
+            cursor.execute("""
+                UPDATE daily_attendance 
+                SET check_out = ?, total_hours = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE employee_id = ? AND date = ?
+            """, (time, hours_str, employee_id, date))
+            
+            logger.info(f"✅ CHECK-OUT: {name} at {time} (Duration: {hours_str})")
+            return 'check_out'
+    
+    # ====== SCENARIO 3: Unknown Status ======
+    else:
+        logger.warning(f"⚠️ Unknown attendance status: {attendance_status}")
+        return 'unknown_status'
 
 @app.route('/api/attendance/daily', methods=['GET'])
 def get_daily_attendance():
@@ -545,8 +616,8 @@ def get_attendance_logs():
         
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        
         logs = [dict(row) for row in rows]
+        
         conn.close()
         
         return jsonify({
@@ -559,112 +630,106 @@ def get_attendance_logs():
         logger.error(f"Error fetching logs: {str(e)}")
         raise APIError("Failed to fetch logs", 500)
 
-@app.route('/api/attendance/missed-checkout', methods=['GET'])
-def get_missed_checkout():
-    """Get employees who missed checkout"""
+@app.route('/api/attendance/anomalies', methods=['GET'])
+def get_anomalies():
+    """Get all records with anomalies"""
     try:
+        date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+        
         conn = get_db()
         cursor = conn.cursor()
-        
-        today = datetime.now().strftime('%Y-%m-%d')
         
         cursor.execute("""
             SELECT * FROM daily_attendance 
-            WHERE date = ? AND check_out IS NULL
-            ORDER BY check_in
-        """, (today,))
+            WHERE date = ? AND anomaly_type IS NOT NULL
+            ORDER BY created_at DESC
+        """, (date,))
         
         rows = cursor.fetchall()
-        missed = [dict(row) for row in rows]
+        anomalies = [dict(row) for row in rows]
         
         conn.close()
         
         return jsonify({
             'success': True,
-            'data': missed,
-            'count': len(missed)
+            'data': anomalies,
+            'count': len(anomalies)
         }), 200
         
     except Exception as e:
-        logger.error(f"Error fetching missed checkouts: {str(e)}")
-        raise APIError("Failed to fetch missed checkouts", 500)
+        logger.error(f"Error fetching anomalies: {str(e)}")
+        raise APIError("Failed to fetch anomalies", 500)
 
-@app.route('/api/attendance/manual-checkout', methods=['POST'])
-def manual_checkout():
-    """Manually checkout an employee"""
+@app.route('/api/attendance/monthly-total/<employee_id>', methods=['GET'])
+def get_monthly_total(employee_id):
+    """Get total hours worked this month for an employee"""
     try:
-        data = request.json
-        employee_id = data.get('employee_id')
-        checkout_time = data.get('checkout_time', datetime.now().strftime('%H:%M:%S'))
-        date = data.get('date', datetime.now().strftime('%Y-%m-%d'))
-        
-        if not employee_id:
-            raise APIError("Employee ID required", 400)
+        year = request.args.get('year', datetime.now().year)
+        month = request.args.get('month', datetime.now().month)
         
         conn = get_db()
         cursor = conn.cursor()
         
         cursor.execute("""
-            SELECT check_in FROM daily_attendance 
-            WHERE employee_id = ? AND date = ?
-        """, (employee_id, date))
+            SELECT 
+                COUNT(*) as days_worked,
+                SUM(
+                    CAST(substr(total_hours, 1, 2) AS INTEGER) * 3600 +
+                    CAST(substr(total_hours, 4, 2) AS INTEGER) * 60 +
+                    CAST(substr(total_hours, 7, 2) AS INTEGER)
+                ) as total_seconds
+            FROM daily_attendance
+            WHERE employee_id = ?
+            AND strftime('%Y', date) = ?
+            AND strftime('%m', date) = ?
+            AND check_out IS NOT NULL
+        """, (employee_id, str(year), str(month).zfill(2)))
         
-        row = cursor.fetchone()
-        if not row:
-            conn.close()
-            raise APIError("No check-in found for this employee", 404)
+        result = cursor.fetchone()
         
-        # Calculate duration
-        check_in_time = datetime.strptime(row['check_in'], '%H:%M:%S')
-        check_out_dt = datetime.strptime(checkout_time, '%H:%M:%S')
-        duration = check_out_dt - check_in_time
+        days_worked = result['days_worked'] or 0
+        total_seconds = result['total_seconds'] or 0
         
-        cursor.execute("""
-            UPDATE daily_attendance 
-            SET check_out = ?, total_hours = ?, is_auto_checkout = 1
-            WHERE employee_id = ? AND date = ?
-        """, (checkout_time, str(duration), employee_id, date))
+        # Convert seconds back to HH:MM:SS
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        total_hours_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         
-        conn.commit()
         conn.close()
-        
-        logger.info(f"✅ Manual checkout: {employee_id} at {checkout_time}")
-        
-        # Broadcast event
-        broadcast_event('manual_checkout', {
-            'employee_id': employee_id,
-            'date': date,
-            'time': checkout_time
-        })
         
         return jsonify({
             'success': True,
-            'message': 'Manual checkout recorded'
+            'data': {
+                'employee_id': employee_id,
+                'year': year,
+                'month': month,
+                'days_worked': days_worked,
+                'total_hours': total_hours_str
+            }
         }), 200
         
-    except APIError:
-        raise
     except Exception as e:
-        logger.error(f"Manual checkout error: {str(e)}")
-        raise APIError("Failed to record checkout", 500)
+        logger.error(f"Error calculating monthly total: {str(e)}")
+        raise APIError("Failed to calculate monthly total", 500)
 
 # ============================================
 # DASHBOARD ROUTES
 # ============================================
+
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
     """Get dashboard statistics"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         today = datetime.now().strftime('%Y-%m-%d')
         
-        # Total ACTIVE employees only
+        # Total ACTIVE employees
         cursor.execute("SELECT COUNT(*) as total FROM employees WHERE status = 'active'")
         total_employees = cursor.fetchone()['total']
         
-        # Present today - ONLY COUNT ACTIVE EMPLOYEES
+        # Present today
         cursor.execute("""
             SELECT COUNT(*) as present 
             FROM daily_attendance da
@@ -673,19 +738,17 @@ def get_dashboard_stats():
         """, (today,))
         present_today = cursor.fetchone()['present']
         
-        # Ensure absent is never negative
         absent_today = max(0, total_employees - present_today)
         
-        # Missed checkout - ONLY ACTIVE EMPLOYEES
+        # Anomalies today
         cursor.execute("""
-            SELECT COUNT(*) as missed 
-            FROM daily_attendance da
-            INNER JOIN employees e ON da.employee_id = e.employee_id
-            WHERE da.date = ? AND da.check_out IS NULL AND e.status = 'active'
+            SELECT COUNT(*) as anomalies
+            FROM daily_attendance
+            WHERE date = ? AND anomaly_type IS NOT NULL
         """, (today,))
-        missed_checkout = cursor.fetchone()['missed']
+        anomaly_count = cursor.fetchone()['anomalies']
         
-        # Recent scans (last 20) - ALL SCANS
+        # Recent scans
         cursor.execute("""
             SELECT * FROM attendance_logs 
             ORDER BY id DESC 
@@ -693,14 +756,9 @@ def get_dashboard_stats():
         """)
         recent_scans = [dict(row) for row in cursor.fetchall()]
         
-        # Today's attendance list - ONLY ACTIVE EMPLOYEES
+        # Today's attendance
         cursor.execute("""
-<<<<<<< HEAD
             SELECT da.* FROM daily_attendance da
-=======
-            SELECT da.* 
-            FROM daily_attendance da
->>>>>>> 063b7682ac44fb8019c76d9a947a515450dfd168
             INNER JOIN employees e ON da.employee_id = e.employee_id
             WHERE da.date = ? AND e.status = 'active'
             ORDER BY da.check_in DESC
@@ -715,7 +773,7 @@ def get_dashboard_stats():
                 'total_employees': total_employees,
                 'present_today': present_today,
                 'absent_today': absent_today,
-                'missed_checkout': missed_checkout,
+                'anomaly_count': anomaly_count,
                 'recent_scans': recent_scans,
                 'todays_attendance': todays_attendance
             }
@@ -755,8 +813,8 @@ def get_departments():
         
         cursor.execute("SELECT DISTINCT department FROM employees WHERE status = 'active' ORDER BY department")
         rows = cursor.fetchall()
-        
         departments = [row['department'] for row in rows]
+        
         conn.close()
         
         return jsonify({
@@ -790,8 +848,7 @@ if __name__ == '__main__':
     # Initialize database
     init_db()
     
-    # 1. TRIGGER THE USER SYNC THREAD
-    # This runs the user.py logic in the background forever
+    # Start user sync thread
     sync_thread = threading.Thread(target=user.start_auto_sync, daemon=True)
     sync_thread.start()
     
@@ -807,8 +864,4 @@ if __name__ == '__main__':
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*60 + "\n")
     
-<<<<<<< HEAD
     app.run(host='0.0.0.0', port=PORT, debug=True, threaded=True)
-=======
-    app.run(host='0.0.0.0', port=PORT, debug=True, threaded=True)
->>>>>>> 063b7682ac44fb8019c76d9a947a515450dfd168

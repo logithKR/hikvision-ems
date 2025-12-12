@@ -28,7 +28,9 @@ api.interceptors.response.use(
   }
 );
 
-// API methods
+// ============================================
+// EMPLOYEE API
+// ============================================
 export const employeeAPI = {
   getAll: (params = {}) => api.get('/api/employees', { params }),
   getById: (id) => api.get(`/api/employees/${id}`),
@@ -37,17 +39,42 @@ export const employeeAPI = {
   delete: (id) => api.delete(`/api/employees/${id}`),
 };
 
+// ============================================
+// ATTENDANCE API (UPDATED)
+// ============================================
 export const attendanceAPI = {
+  // Get daily attendance summary
   getDaily: (date) => api.get('/api/attendance/daily', { params: { date } }),
-  getLogs: (limit = 50) => api.get('/api/attendance/logs', { params: { limit } }),
-  getMissedCheckout: () => api.get('/api/attendance/missed-checkout'),
+  
+  // Get raw attendance logs
+  getLogs: (params = {}) => api.get('/api/attendance/logs', { params }),
+  
+  // NEW: Get attendance anomalies (replaces missed checkout)
+  getAnomalies: (date) => api.get('/api/attendance/anomalies', { params: { date } }),
+  
+  // NEW: Get monthly total hours for an employee
+  getMonthlyTotal: (employeeId, year, month) => 
+    api.get(`/api/attendance/monthly-total/${employeeId}`, { 
+      params: { year, month } 
+    }),
+  
+  // Manual checkout (admin function)
   manualCheckout: (data) => api.post('/api/attendance/manual-checkout', data),
+  
+  // DEPRECATED: Old endpoint (keeping for backward compatibility)
+  getMissedCheckout: () => api.get('/api/attendance/anomalies'),
 };
 
+// ============================================
+// DASHBOARD API
+// ============================================
 export const dashboardAPI = {
   getStats: () => api.get('/api/dashboard/stats'),
 };
 
+// ============================================
+// SYSTEM API
+// ============================================
 export const systemAPI = {
   health: () => api.get('/api/system/health'),
   getDepartments: () => api.get('/api/system/departments'),
